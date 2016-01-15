@@ -4,7 +4,7 @@ import java.util.Scanner
 import scala.StringBuilder
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
-import just4fun.core.async.{FutureContextOwner, DefaultFutureContext}
+import just4fun.core.async.{FutureX, FutureContextOwner, DefaultFutureContext}
 import just4fun.core.modules.Module
 import just4fun.utils.logger.Logger._
 import just4fun.utils.logger.LoggerConfig
@@ -55,6 +55,7 @@ class TestApp[M1 <: Module1 : Manifest, M2 <: Module2 : Manifest, M3 <: Module3 
 	//	  .setInject(ModCreate, true, _ ⇒ m1.setRestful(true))
 //	  .setInject(ModActStart, true, _ ⇒ throw new TestingException)
 	private[this] var scanner: Scanner = _
+	private[this] var manual = false
 	private[this] var quit = false
 	val rx = """(\d*)(\D+)(\d*)""".r
 	private[this] var parallel = false
@@ -96,7 +97,7 @@ class TestApp[M1 <: Module1 : Manifest, M2 <: Module2 : Manifest, M3 <: Module3 
 		}
 		// EXEC
 		commands.split(' ').foreach { com ⇒
-			if (parallel && com .charAt(0) != '/') new Thread(() ⇒ exec(com, true)).start()
+			if (parallel && com.charAt(0) != '/') new Thread(() ⇒ exec(com, true)).start()
 			else exec(com, false)
 		}
 	}
@@ -125,7 +126,7 @@ class TestApp[M1 <: Module1 : Manifest, M2 <: Module2 : Manifest, M3 <: Module3 
 					case "i" ⇒ if (s2.isEmpty) cfg1.printInjects() else cfg1.switchInject(n2, true)
 					case "ix" ⇒ if (s2.isEmpty) cfg1.bits = 0 else cfg1.switchInject(n2, false)
 					case "z" ⇒ logV(draftReport())
-					case "zx" ⇒ logV(draftReport()); HitPoints.reset()
+					case "zx" ⇒ logV(draftReport(true))
 					case "L" ⇒ LoggerConfig.skipTag(tagCallbacks, n2 != 1)
 					case "x" ⇒ newSys = true
 					case "/" ⇒ quit = true; appQuit()
@@ -150,32 +151,38 @@ class TestApp[M1 <: Module1 : Manifest, M2 <: Module2 : Manifest, M3 <: Module3 
 	}
 
 	/* MANUAL TEST */
-	protected[this] def manualTest(report: Boolean = false, extraCases: PartialFunction[(String, String, String), Unit] = null): Unit = {
+	protected[this] def manualTest(configCode: ⇒ Unit)(extraCases: PartialFunction[(String, String, String), Unit] = null): Unit = {
+		configCode
+		manual = true
 		scanner = new Scanner(System.in)
-		while (!quit) {
+		while (true) {
 			val line = scanner.nextLine
 			onCommands(line, extraCases)
 		}
-		appAwait()
-		logV(s"Commands\n${commands.mkString(" ")}")
-		if (report) logV(draftReport())
 	}
-	protected[this] def draftReport(): String = {
+	private[this] def manualTestFinish(): Unit = {
+		parallel = false
+		logV(s"Commands\n${commands.mkString(" ")}")
+		logV(draftReport(true))
+	}
+	protected[this] def draftReport(reset: Boolean = false): String = {
 		val buff = new StringBuilder("Report draft\n")
 		buff ++= HitPoints.printSeq(HitPoints.sequence)
+		if (reset) HitPoints.reset()
 		buff.toString()
 	}
 
 	/* AUTO TEST */
 	protected[this] def autoTest(autoTests: (() ⇒ AutoTest)*): Unit = {
 		autoTests.foreach { fun ⇒
-			reinit()
 			val test = fun()
 			logV(s"\n\n*************                        TEST [${test.name}]")
 			onCommands(test.commands, test.extraCases)
 			waitSystemFinish()
 			logW(report(test.name, test.assertions))
 			HitPoints.reset()
+			parallel = false
+			reinit()
 		}
 		quit = true
 		appQuit()
@@ -196,14 +203,14 @@ class TestApp[M1 <: Module1 : Manifest, M2 <: Module2 : Manifest, M3 <: Module3 
 	}
 	def onSystemFinish(): Unit = synchronized {
 		notifyAll()
+		if (manual) manualTestFinish()
 		appQuit()
 	}
 	def appQuit(): Unit = {
 		if (!system.asyncContext.isStarted) {
-			if (quit) context.exit(true)
+			if (quit) FutureX.post(500)(System.exit(4))
 			else if (newSys) {
 				logV(draftReport())
-				HitPoints.reset()
 				system = newSystem
 				newSys = false
 			}

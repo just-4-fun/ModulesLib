@@ -156,7 +156,7 @@ trait BindingProcessor {
 				if (sync) addSyncClient(client)
 				if (LoggerConfig.isDebug) client.detectCyclicBinding(this, client :: Nil) match {
 					case Nil =>
-					case trace => logW(s"Cyclic usage detected in chain [${trace.map(_.getClass.getSimpleName).mkString(", ")}]")
+					case trace => logW(s"Cyclic module relations detected in chain [${trace.map(_.getClass.getSimpleName).mkString(", ")}]")
 				}
 			case _ ⇒ if (!sync) removeSyncClient(client)
 		}
@@ -463,7 +463,7 @@ trait StateProcessor {
 			// fireEvent(new UnableToServeEvent)
 		}
 	}
-	private[this] def destroy_? : Boolean = (isUnbound && detached) || (isUnbound && is(Creating) && is(Constructed) && !isBusy)
+	private[this] def destroy_? : Boolean = is(Detached) || (isUnbound && is(Creating) && is(Constructed) && !isBusy&& detached)
 	private[this] def destroy_>> : Unit = {
 		setState(DESTROYED)
 		try if (internal != null) internal.callDestroyed() catch loggedE

@@ -71,10 +71,12 @@ abstract class TestModule(val id: Int = 0) extends Module {
 	private[this] var activatingDone = false
 	private[this] var deactivatingDone = false
 	protected[this] var count = 0
+	//
+	ModCreate.hit()
+	//
 	override protected[this] val internal = new TestCallbacks
 	override protected[this] val lifeCycle = new TestLifeCycle
 	//
-	ModCreate.hit()
 	if (startRestful) setRestful(true)
 	if (startSuspended) suspendService(true)
 

@@ -46,10 +46,11 @@ trait ModuleSystem extends RestoreSubsystem with FutureContextOwner {
 		onSystemStart()
 	}
 	private[this] def canStop: Boolean = {
-		logV(s"canStop locked? ${lock.isLocked};  detached.empty? ${detached.isEmpty};  mods: ${modules.map(_.getClass.getSimpleName).mkString(", ")}")
+//		logV(s"canStop locked? ${lock.isLocked};  detached.empty? ${detached.isEmpty};  mods: ${modules.map(_.getClass.getSimpleName).mkString(", ")}")
 		modules.isEmpty && detached.isEmpty
 	}
 	private[this] def stopSystem(): Unit = {
+//		logV(s"SYS Stop: canStop? ${canStop}; notStopped? ${!isSystemStopped};  nonLocked& ${!lock.isLocked}")
 		if (canStop && !isSystemStopped && !lock.isLocked) {
 			asyncContext.stop(true)
 			if (!lock.isLocked) onSystemStop()
@@ -128,9 +129,9 @@ trait ModuleSystem extends RestoreSubsystem with FutureContextOwner {
 	protected[this] def currentTimeMs: Long = System.currentTimeMillis()
 
 
-	/* INTERNAL API */
+	/* MODULE BIND */
 	private[modules] def bind[M <: Module](serverClas: Class[M], client: Module, sync: Boolean = false, restore: Boolean = false, constr: () ⇒ M = null): M = {
-		logV(s"before LOCK bind [${Thread.currentThread().getName}] :  [${serverClas.getSimpleName}]")
+//		logV(s"before LOCK bind [${Thread.currentThread().getName}] :  [${serverClas.getSimpleName}]")
 		lock.lock()
 		val holdCount = lock.getHoldCount
 //		logV(s"after LOCK bind [${Thread.currentThread().getName}] :  [${serverClas.getSimpleName}]")
@@ -194,7 +195,11 @@ trait ModuleSystem extends RestoreSubsystem with FutureContextOwner {
 			case Some(list) => list.head
 		}
 	}
+	private[this] def prepareModule(m: Module): Unit = if (m.not(StateParams.Prepared)) {
+		try onModulePrepare(new ModulePreparePromise(m)) catch loggedE
+	}
 
+	/* MODULE UNBIND */
 	private[modules] def unbind[M <: Module](serverClas: Class[M], client: Module, stopID: Int = 0): Option[M] = {
 		find(serverClas) match {
 			case mOp@Some(m) if stopID == 0 || m.stopped(stopID) ⇒
@@ -225,15 +230,10 @@ trait ModuleSystem extends RestoreSubsystem with FutureContextOwner {
 		if (canStop) FutureX(stopSystem())
 	}
 
-
-	/* PRIVATE API */
+	/* MODULE MISC */
 	private[this] def find[M <: Module](clas: Class[M]): Option[M] = {
 		modules.find(m ⇒ m.getClass == clas).asInstanceOf[Option[M]]
 	}
-	private[this] def prepareModule(m: Module): Unit = if (m.not(StateParams.Prepared)) {
-		try onModulePrepare(new ModulePreparePromise(m)) catch loggedE
-	}
-
 	private[this] def isPredecessor(m1: Module, m2: Module): Boolean = {
 		m1.getClass == m2.getClass && m1.ne(m2)
 	}
