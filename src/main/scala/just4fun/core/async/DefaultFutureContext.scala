@@ -29,9 +29,6 @@ class DefaultFutureContext(implicit val owner: FutureContextOwner) extends Futur
 	override protected[this] def execute_inner(id: Any, delay: Long, r: Runnable): Unit = {
 		add(new Message(id, delay, r))
 	}
-	override protected[this] def execute_inner(r: Runnable): Unit = {
-		add(new Message(null, 0, r))
-	}
 	override protected[this] def clear_inner(): Unit = {
 		list.clear()
 	}

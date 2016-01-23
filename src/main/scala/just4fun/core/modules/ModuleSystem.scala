@@ -1,12 +1,9 @@
 package just4fun.core.modules
 
 import java.util.concurrent.locks.ReentrantLock
-import just4fun.core.async.{FutureContextOwner, FutureX, FutureContext}
-
 import scala.collection.mutable
+import just4fun.core.async.{FutureContext, FutureContextOwner}
 import just4fun.utils.logger.Logger._
-
-import scala.concurrent.Promise
 
 
 private[modules] object ModuleSystem {
@@ -17,9 +14,11 @@ private[modules] object ModuleSystem {
 
 
 
-trait ModuleSystem extends RestoreSubsystem with FutureContextOwner {
+trait ModuleSystem extends FutureContextOwner {
 	ModuleSystem.instance = this
+	implicit val thisSystem: this.type = this
 	implicit val asyncContext: FutureContext
+	protected[this] val restoreAgent: ModuleRestoreAgent = null
 	private[this] val modules = mutable.ListBuffer[Module]()
 	private[this] val detached = mutable.ListBuffer[Module]()
 	private[this] var sysClient: RootModule = null
@@ -32,10 +31,11 @@ trait ModuleSystem extends RestoreSubsystem with FutureContextOwner {
 	private[this] var currentSync = false
 	private[this] var currentRestore = false
 
+
 	/* SYSTEM API */
 	// todo more elegant
-	def isSystemStopped: Boolean = sysClient == null && modules.isEmpty && detached.isEmpty
-	def isSystemStopping: Boolean = stopping
+	final def isSystemStopped: Boolean = sysClient == null && modules.isEmpty && detached.isEmpty
+	final def isSystemStopping: Boolean = stopping
 	/* callbacks */
 	protected[this] def onSystemStart(): Unit = ()
 	protected[this] def onSystemStop(): Unit = ()
@@ -62,58 +62,36 @@ trait ModuleSystem extends RestoreSubsystem with FutureContextOwner {
 
 	/* MODULE API */
 
-	def hasModule[M <: Module : Manifest]: Boolean = hasModule(moduleClass)
-	def hasModule[M <: Module](cls: Class[M]): Boolean = find(cls).nonEmpty
+	final def hasModule[M <: Module : Manifest]: Boolean = hasModule(moduleClass)
+	final def hasModule[M <: Module](cls: Class[M]): Boolean = find(cls).nonEmpty
 
-	def startModule[M <: Module : Manifest]: Unit = {
-		val server = bind[M](moduleClass, systemClient)
-		if (server.isRestorable) updateRestorables(server.getClass, true)
+	final def startModule[M <: Module : Manifest]: Unit = {
+		bind(moduleClass, systemClient)
 	}
-	def startModule[M <: Module : Manifest](constructor: ⇒ M): Unit = {
-		val server = bind[M](moduleClass, systemClient, constr = () ⇒ constructor)
+	final def startModule[M <: Module : Manifest](constructor: ⇒ M): Unit = {
+		bind(moduleClass, systemClient, constr = () ⇒ constructor)
 	}
-	def startModule[M <: Module : Manifest](stopID: Int): Unit = {
-		val server = bind[M](moduleClass, systemClient)
-		if (stopID == 0 && server.isRestorable) updateRestorables(server.getClass, true)
-		server.started(stopID)
+	final def startModule[M <: Module : Manifest](stopID: Int): Unit = {
+		bind(moduleClass, systemClient, false, false, null, stopID)
 	}
-	def startModule[M <: Module](clas: Class[M], stopID: Int = 0): Unit = {
-		val server = bind(clas, systemClient, false, false, null)
-		if (stopID == 0 && server.isRestorable) updateRestorables(server.getClass, true)
-		server.started(stopID)
+	final def startModule[M <: Module](clas: Class[M], stopID: Int = 0): Unit = {
+		bind(clas, systemClient, false, false, null, stopID)
 	}
 	private[modules] def connectModule[M <: Module](clas: Class[M], stopID: Int): M = {
-		val server = bind(clas, systemClient, false, false, null)
-		server.started(stopID)
-		server
+		bind(clas, systemClient, false, false, null, stopID)
 	}
 
-	/** @return true if stop has effect i.e. module is unbound. */
-	def stopModule[M <: Module : Manifest]: Boolean = {
-		unbind[M](moduleClass, systemClient) match {
-			case Some(m) ⇒ updateRestorables(moduleClass, false); m.isUnbound
-			case _ ⇒ false
-		}
+	final def stopModule[M <: Module : Manifest]: Unit = {
+		unbind[M](moduleClass, systemClient)
 	}
-	/** @return true if stop has effect i.e. module is unbound. */
-	def stopModule[M <: Module : Manifest](stopID: Int): Boolean = {
-		unbind[M](moduleClass, systemClient, stopID) match {
-			case Some(m) ⇒ m.isUnbound
-			case _ ⇒ false
-		}
+	final def stopModule[M <: Module : Manifest](stopID: Int): Unit = {
+		unbind[M](moduleClass, systemClient, stopID)
 	}
-	def stopModule[M <: Module](clas: Class[M], stopID: Int = 0): Boolean = {
-		unbind(clas, systemClient, stopID) match {
-			case Some(m) ⇒ m.isUnbound
-			case _ ⇒ false
-		}
+	final def stopModule[M <: Module](clas: Class[M], stopID: Int = 0): Unit = {
+		unbind(clas, systemClient, stopID)
 	}
-	/** @return true if stop has effect i.e. module is unbound. */
-	private[modules] def disconnectModule[M <: Module](clas: Class[M], stopID: Int): Boolean = {
-		unbind(clas, systemClient, stopID) match {
-			case Some(m) ⇒ m.isUnbound
-			case _ ⇒ false
-		}
+	private[modules] def disconnectModule[M <: Module](clas: Class[M], stopID: Int): Unit = {
+		unbind(clas, systemClient, stopID)
 	}
 
 
@@ -130,18 +108,21 @@ trait ModuleSystem extends RestoreSubsystem with FutureContextOwner {
 
 
 	/* MODULE BIND */
-	private[modules] def bind[M <: Module](serverClas: Class[M], client: Module, sync: Boolean = false, restore: Boolean = false, constr: () ⇒ M = null): M = {
+	private[modules] def bind[M <: Module](serverClas: Class[M], clentModule: Module, sync: Boolean = false, restore: Boolean = false, constr: () ⇒ M = null, stopID: Int = 0): M = {
 //		logV(s"before LOCK bind [${Thread.currentThread().getName}] :  [${serverClas.getSimpleName}]")
 		lock.lock()
 		val holdCount = lock.getHoldCount
 //		logV(s"after LOCK bind [${Thread.currentThread().getName}] :  [${serverClas.getSimpleName}]")
 		try {
-			if (!client.isInstanceOf[RootModule] && !modules.contains(client)) throw new ModuleBindException(serverClas, "It is not registered in system.")
+			val client = if (clentModule == null) systemClient else clentModule
+			if (!client.isInstanceOf[RootModule] && !modules.contains(client)) throw new ModuleBindException(serverClas, "It's not registered in system.")
 			find(serverClas) match {
 				case Some(server) ⇒ server.bindingAdd(client, sync)
 //					logV(s"before UNLOCK bind [${Thread.currentThread().getName}] :  [${serverClas.getSimpleName}]")
 					lock.unlock()
+					if (!server.isConstructed) server.synchronized(server.wait(100))
 					server.onBindingAdd(client, sync)
+					if (stopID != 0) server.started(stopID)
 					server
 //		logV(s"Sys bind [${client.getClass.getSimpleName}] to [${m.getClass.getSimpleName}];  exists; sync? $sync; restore? $restore")
 				case None ⇒ if (modules.isEmpty) startSystem()
@@ -150,14 +131,20 @@ trait ModuleSystem extends RestoreSubsystem with FutureContextOwner {
 					currentSync = sync
 					currentRestore = restore
 					val server = try if (constr == null) serverClas.newInstance() else constr()
-					catch {case e: Throwable ⇒ currentModule.fail(e); currentModule.asInstanceOf[M]}
-					if (server != currentModule) logE(s"Detected a try to create ${serverClas.getName} outside the system.")// \n${currentModules.map(_.getClass.getSimpleName).mkString(", ")}")
+					catch {
+						case e: Throwable ⇒ currentModule.fail(e, false)
+							currentModule.asInstanceOf[M]
+					}
+					if (server != currentModule) throw new ModuleBindException(serverClas, s"It's constructed outside the system.")
 					currentModule = null
 //		logV(s"Sys Constructed [${clas.getSimpleName}]")
 					server.setConstructed()
+					server synchronized (server.notifyAll())
 					server.onBindingAdd(client, sync)
 					if (!detached.exists(isPredecessor(_, server))) prepareModule(server)
 //		logV(s"Sys bind [${client.getClass.getSimpleName}] to [${m.getClass.getSimpleName}];  created; sync? $sync; restore? $restore")
+					if (stopID != 0) server.started(stopID)
+					else if (server.shouldRestore && client == sysClient && restoreAgent != null) restoreAgent.set(server, true)
 					server
 			}
 		}
@@ -195,29 +182,33 @@ trait ModuleSystem extends RestoreSubsystem with FutureContextOwner {
 			case Some(list) => list.head
 		}
 	}
-	private[this] def prepareModule(m: Module): Unit = if (m.not(StateParams.Prepared)) {
+	private[this] def prepareModule(m: Module): Unit = if (!m.isPrepared) {
 		try onModulePrepare(new ModulePreparePromise(m)) catch loggedE
 	}
 
 	/* MODULE UNBIND */
-	private[modules] def unbind[M <: Module](serverClas: Class[M], client: Module, stopID: Int = 0): Option[M] = {
+	private[modules] def unbind[M <: Module](serverClas: Class[M], clentModule: Module, stopID: Int = 0): Option[M] = {
+		val client = if (clentModule == null) systemClient else clentModule
 		find(serverClas) match {
 			case mOp@Some(m) if stopID == 0 || m.stopped(stopID) ⇒
 //				logV(s"Sys unbind [${client.getClass.getSimpleName}] from [${m.getClass.getSimpleName}];  stopID= $stopID")
+				if (!m.isConstructed) m.synchronized(m.wait(100))
 				m.bindingRemove(client)
-				if (client == sysClient && !modules.exists(_.boundTo(sysClient))) stopping = true
+				if (client == sysClient && !modules.exists(_.isBoundTo(sysClient))) stopping = true
 				mOp
 			case _ ⇒ None
 		}
 	}
 	private[modules] def detach(implicit module: Module): Boolean = {
 		lock.lock()
-		try if (module.isUnbound) {
+		val ok = try if (module.hasNoBindings) {
 			modules -= module
 			detached += module
 			true
 		} else false
 		finally lock.unlock()
+		if (ok && module.isRestorable && restoreAgent != null) restoreAgent.set(module, false)
+		ok
 	}
 	private[modules] def destroyed(implicit module: Module): Unit = {
 		detached -= module
@@ -227,7 +218,7 @@ trait ModuleSystem extends RestoreSubsystem with FutureContextOwner {
 			else m.bindingRemove(module)
 		}
 		try onModuleDestroy(module) catch loggedE
-		if (canStop) FutureX(stopSystem())
+		if (canStop) asyncContext.execute(() ⇒ stopSystem())
 	}
 
 	/* MODULE MISC */
@@ -245,6 +236,7 @@ trait ModuleSystem extends RestoreSubsystem with FutureContextOwner {
 		sysClient
 	}
 
+
 	/* BACK DOOR */
 	private[modules] def postUpdate(delay: Long)(implicit m: Module): Unit = postStateUpdate(delay)
 	private[modules] def cancelUpdate()(implicit m: Module): Unit = cancelStateUpdate
@@ -256,36 +248,13 @@ trait ModuleSystem extends RestoreSubsystem with FutureContextOwner {
 
 
 
-
-/* RESTORE SUBSYSTEM */
-private[modules] trait RestoreSubsystem {
-	mgr: ModuleSystem ⇒
-	def checkRestore(): Unit = {
-	}
-	private def restore(modules: List[String]): Unit = modules.foreach { name ⇒
-	}
-	def updateRestorables(m: Class[_], yeap: Boolean): Unit = {
-	}
-}
-
-
-
-
-
-
 /* ROOT MODULE */
-private[modules] class RootModule extends Module {
-	// TODO ?
-//	override protected[this] lazy val lifeCycle: LifeCycle = new LifeCycle {
-//		override protected[this] def onActivatingStart(primary: Boolean, complete: CompleteSelector) = complete.when(true)
-//	}
-	//	lifeCycle.completeActivating()
-}
+private[modules] class RootModule extends Module
 
 
 
 
-/* MODULE CREATEP ROMISE */
+/* MODULE PREPARE PROMISE */
 class ModulePreparePromise(val module: Module) {
 	def complete(): Unit = module.setPrepared()
 }
@@ -293,7 +262,7 @@ class ModulePreparePromise(val module: Module) {
 
 
 
-/* MODULE HOLDER */
+/* MODULE CONNECTOR */
 /** Usage Contract:  Before discard object call onDestroy method. After that module will not be able to serve requests. */
 trait ModuleConnector[M <: Module] {
 	import ModuleSystem._
@@ -315,5 +284,59 @@ trait ModuleConnector[M <: Module] {
 	override def finalize(): Unit = {
 		moduleDisconnect()
 		super.finalize()
+	}
+}
+
+
+
+/* RESTORE AGENT */
+abstract class ModuleRestoreAgent(implicit system: ModuleSystem) {
+	private[this] var phase = 0
+	private[this] var temp: Set[String] = null
+	lazy val autoStart = true
+	if (autoStart) start()
+
+	protected[this] def getList: TraversableOnce[String]
+	protected[this] def clearList(): Unit
+	protected[this] def add(moduleClass: String): Unit
+	protected[this] def remove(moduleClass: String): Unit
+	protected[this] def onStart(codeToRun: () ⇒ Unit): Unit = system.asyncContext.execute { () ⇒ codeToRun() }
+	protected[this] def onRestored(clas: Class[_]): Unit = ()
+
+
+	final def start(): Unit = if (phase == 0) {
+		phase = 1
+		try onStart(exec) catch loggedE
+	}
+	private[this] def exec(): Unit = {
+		val classNames = getList match {
+			case null => Nil
+			case list => if (list.nonEmpty) clearList(); list
+		}
+		synchronized {
+			if (temp != null) temp.foreach(clas ⇒ try add(clas) catch loggedE)
+			phase = 2
+			temp = null
+		}
+		classNames.foreach { name => try restore(name) catch loggedE }
+	}
+	private[this] def restore(name: String): Unit = {
+		val cls = Class.forName(name).asInstanceOf[Class[_ <: Module]]
+//		logV(s"BEFORE  RESTORED  ${cls.getSimpleName};  not yet created? ${!system.hasModule(cls)}")
+		if (!system.hasModule(cls)) {
+			val m = system.bind(cls, null, false, true)
+			if (!m.shouldRestore) system.unbind(cls, null)
+			else onRestored(cls)
+		}
+//		logV(s"AFTER RESTORED  ${cls.getSimpleName}")
+	}
+	protected[modules] final def set(m: Module, yep: Boolean): Unit = synchronized {
+		if (yep) m.setRestorable()
+		val clas = m.getClass.getName
+		if (phase < 2) {
+			if (temp == null) temp = Set()
+			if (yep) temp += clas else temp -= clas
+		}
+		else try if (yep) add(clas) else remove(clas) catch loggedE
 	}
 }

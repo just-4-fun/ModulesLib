@@ -4,6 +4,7 @@ import java.util.Scanner
 import scala.StringBuilder
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
+import scala.language.implicitConversions
 import just4fun.core.async.{FutureX, FutureContextOwner, DefaultFutureContext}
 import just4fun.core.modules.Module
 import just4fun.utils.logger.Logger._
@@ -12,6 +13,7 @@ import just4fun.utils.logger.LoggerConfig
 
 object TestApp {
 	val tagCallbacks = 299332
+	val tagEvents = 299338
 	private var i: TestApp[_, _, _, _, _] = _
 	def apply() = i
 }
@@ -28,6 +30,7 @@ class TestApp[M1 <: Module1 : Manifest, M2 <: Module2 : Manifest, M3 <: Module3 
 	  .skipTag(Module.tagParam)
 	  .skipTag(Module.tagStateX)
 //	  .skipTag(Module.tagState)
+//	  .skipTag(Module.tagEvents)
 
 	TestApp.i = this
 	var system: TestSystem = newSystem
@@ -61,11 +64,15 @@ class TestApp[M1 <: Module1 : Manifest, M2 <: Module2 : Manifest, M3 <: Module3 
 	private[this] var parallel = false
 	private[this] var newSys = false
 	private[this] val commands = ArrayBuffer[String]()
+	private[this] var testCount = 0
+	private[this] var failedReports: List[String] = _
+	var systemPrepareDelay = 0
+
 
 	def newSystem = new TestSystem
 	def reinit(): Unit = {
 //		system = newSystem
-		system.prepareDelay = 0
+		systemPrepareDelay = 0
 		cfg1 = TestConfig()
 		cfg2 = TestConfig()
 		cfg3 = TestConfig()
@@ -87,6 +94,12 @@ class TestApp[M1 <: Module1 : Manifest, M2 <: Module2 : Manifest, M3 <: Module3 
 		case 4 ⇒ (m4, cfg4, clas4, con4)
 		case 5 ⇒ (m5, cfg5, clas5, con5)
 		case _ ⇒ (null, null, null, null)
+	}
+	def moduleIndex(clas: Class[_]): Int = {
+		if (clas == clas1) 1 else if (clas == clas2) 2 else if (clas == clas3) 3 else if (clas == clas4) 4 else if (clas == clas5) 5 else 0
+	}
+	def moduleOf(clas: Class[_]): TestModule = {
+		if (clas == clas1) m1 else if (clas == clas2) m2 else if (clas == clas3) m3 else if (clas == clas4) m4 else if (clas == clas5) m5 else null
 	}
 
 	def onCommands(commands: String, extraCases: PartialFunction[(String, String, String), Unit] = null): Unit = {
@@ -117,24 +130,28 @@ class TestApp[M1 <: Module1 : Manifest, M2 <: Module2 : Manifest, M3 <: Module3 
 					case "bs" ⇒ m1.bind(clas2, true)
 					case "bx" ⇒ m1.unbind(clas2)
 					case "u" ⇒ m1.use(n2)
-					case "r" ⇒ m1.setRestful(true)
-					case "rx" ⇒ m1.setRestful(false)
-					case "p" ⇒ m1.suspendService(true)
-					case "px" ⇒ m1.suspendService(false)
-					case "f" ⇒ m1.setFailed()
-					case "fx" ⇒ m1.recover()
+					case "r" ⇒ m1.setRestful_(true)
+					case "rx" ⇒ m1.setRestful_(false)
+					case "p" ⇒ m1.suspendService_(true)
+					case "px" ⇒ m1.suspendService_(false)
+					case "f" ⇒ if (s2.isEmpty) m1.setFailed() else cfg1.fail(n2, true)
+					case "fx" ⇒ if (s2.isEmpty) {if (!m1.recover_()) logV(s"Oops.. can't recover")} else cfg1.fail(n2, false)
 					case "i" ⇒ if (s2.isEmpty) cfg1.printInjects() else cfg1.switchInject(n2, true)
 					case "ix" ⇒ if (s2.isEmpty) cfg1.bits = 0 else cfg1.switchInject(n2, false)
+					case "?" ⇒ logV(m1.stateInfo())
 					case "z" ⇒ logV(draftReport())
 					case "zx" ⇒ logV(draftReport(true))
 					case "L" ⇒ LoggerConfig.skipTag(tagCallbacks, n2 != 1)
 					case "x" ⇒ newSys = true
+					case "@" ⇒ reinit()
 					case "/" ⇒ quit = true; appQuit()
 					case "//" ⇒ waitSystemFinish(n2)
 					case "///" ⇒ Thread.sleep(n2); logV(s"->> wake")
 					case "/=" ⇒ parallel = true
 					case "/=/" ⇒ parallel = false
-					case "#pd" ⇒ system.prepareDelay = n2
+					case "rs" ⇒ system.restore(s2)
+					case "#pd" ⇒ systemPrepareDelay = n2
+					case "#sp" ⇒ cfg1.startParallel = n2 == 1
 					case "#sr" ⇒ cfg1.startRestful = n2 == 1
 					case "#ss" ⇒ cfg1.startSuspended = n2 == 1
 					case "#ad" ⇒ cfg1.activatingDelay = n2
@@ -174,9 +191,12 @@ class TestApp[M1 <: Module1 : Manifest, M2 <: Module2 : Manifest, M3 <: Module3 
 
 	/* AUTO TEST */
 	protected[this] def autoTest(autoTests: (() ⇒ AutoTest)*): Unit = {
+		failedReports = Nil
+		val t0 = System.currentTimeMillis
 		autoTests.foreach { fun ⇒
 			val test = fun()
-			logV(s"\n\n*************                        TEST [${test.name}]")
+			testCount += 1
+			logV(s"\n\n*************                        TEST:$testCount  [${test.name}]")
 			onCommands(test.commands, test.extraCases)
 			waitSystemFinish()
 			logW(report(test.name, test.assertions))
@@ -184,12 +204,15 @@ class TestApp[M1 <: Module1 : Manifest, M2 <: Module2 : Manifest, M3 <: Module3 
 			parallel = false
 			reinit()
 		}
+		logW(s"Tests time= ${(System.currentTimeMillis - t0)/1000} sec")
+		if (failedReports.nonEmpty)logW(s"\nReports failed ${failedReports.size}:\n${failedReports.mkString("\n")}")
 		quit = true
 		appQuit()
 	}
 	protected[this] def report(name: String, asserts: Seq[Assertion]): String = {
 		val failures = asserts.map(_ ()).withFilter(!_.isOk).map(_.toString()).mkString("\n")
-		s"\n\n*************                        REPORT [$name]:\nActual sequence:\n${printSeq(sequence)}\n\n${if (failures.isEmpty) "OK" else failures}"
+		if (failures.nonEmpty) failedReports = s"TEST:$testCount  [$name]" :: failedReports
+		s"\n\n** REPORT **:\nActual sequence:\n${printSeq(sequence)}\n\n${if (failures.isEmpty) "OK" else failures}\n"
 	}
 	protected[this] implicit def autotest2f(test: ⇒ AutoTest): (() ⇒ AutoTest) = () ⇒ test
 	protected[this] implicit def assert2f(asserts: ⇒ Assertion): (() ⇒ Assertion) = () ⇒ asserts
@@ -235,12 +258,12 @@ abstract class AutoTest(val name: String, val commands: String) {
 /* POINTS */
 object HitPoints extends HitPointSet {
 	val ModCreate, ModConstr, ModPrepare, ModActStart, ModActProgress, ModActCompl,
-	ModDeactStart, ModDeactProgress, ModDeactCompl, ModFailed, ModFailure, ModDestroy,
-	ModBindAdd, ModBindRemove, ModReqAdd, ModReqExec, ModReqComplete, ModReqRemove = new HitPointVal(false)
+	ModDeactStart, ModDeactProgress, ModDeactCompl, ModFailed, ModDestroy,
+	ModBindAdd, ModBindRemove, ModReqAdd, ModReqExec, ModReqComplete, ModReqRemove, ModRestored, ModRestoreAdd, ModRestoreRemove = new HitPointVal(false)
 	val SysStart, SysFinish, SysModPrepare, SysModDestroy = new HitPointVal(true)
 	val points: mutable.Buffer[HitPointVal] = values.to[mutable.Buffer].map(p ⇒ p.asInstanceOf[HitPointVal])
-	val sysPoints = points.filter(_.system)
-	val modPoints = points.filter(!_.system)
+	val sysPoints: mutable.Buffer[HitPointVal] = points.filter(_.system)
+	val modPoints: mutable.Buffer[HitPointVal] = points.filter(!_.system)
 	val sequence = mutable.ArrayBuffer[Hit]()
 	val alterSeq = mutable.ArrayBuffer[Hit]()
 	def reset(): Unit = {
@@ -263,7 +286,7 @@ object HitPoints extends HitPointSet {
 		var line = 0
 		seq.foldLeft(Hit(0, 0, 0)) { (h1, h2) ⇒
 			val delay = if (h1 == null) 0 else if (h1.delay > 0) h1.delay else if (h2 != null) h2.time - h1.time else 0
-			if (delay >= 950) buff ++= s">@$delay"
+			if (delay >= 500) buff ++= s">@$delay"
 			if (buff.nonEmpty) buff ++= s">>"
 			buff ++= (if (h2 == null) "" else h2.toString)
 			if (buff.length / 100 > line) {line += 1; buff ++= "\n"}
@@ -350,6 +373,11 @@ class HitPointSet extends Enumeration {
 	class HitPointVal(val system: Boolean) extends Val with HitPoint
 }
 
+
+object HitPoint {
+	implicit def p2ix(p: HitPoint): Int = p.index
+}
+
 trait HitPoint {
 	this: Enumeration#Value ⇒
 	val system: Boolean
@@ -371,9 +399,9 @@ trait HitPoint {
 	def >? : Assertion = HitPoints.compareSequences("")
 	def >?(name: String): Assertion = HitPoints.compareSequences(name)
 	def hit(param: Any = null)(implicit m: TestModule): Unit = {
-		if (m != null) m.config.execInject(id, param)
 		val h = Hit(index, if (m != null) m.id else 0, param)
 		HitPoints add2seq h
+		if (m != null) m.config.execInject(index, param)
 	}
 }
 

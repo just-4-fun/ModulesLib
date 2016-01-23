@@ -76,7 +76,7 @@ sealed class FutureXBase[T] extends Runnable {
 	def activate(id: Any = null, delay: Long = 0, replace: Boolean = true): this.type = synchronized {
 		if (_state == NONE) {
 			_state = WAIT
-			if (_context != null) _context.execute(if (id == null) this else id, delay, id != null , this)
+			if (_context != null) _context.execute(if (id == null) this else id, delay , this, id != null)
 			else finishExecute(Failure(new Exception("Context is null")))
 		}
 		this
